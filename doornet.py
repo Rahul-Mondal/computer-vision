@@ -14,23 +14,25 @@ from keras.initializers import RandomNormal, Constant
 from keras.constraints import maxnorm
 from keras.utils import np_utils
 
-from sklearn.utils import shuffle
-from sklearn.model_selection import train_test_split
+from sklearn.cross_validation import StratifiedKFold
 
 # Initialize network parameters
 batch_size = 64
 epochs = 50
 num_classes = 2
 
+xfile='x_labels.npy'
+yfile='y_labels.npy'
+
 def load_data():
 	
 	print('Loading data . . .')
 	
-	i = np.load('x_labels.npy')
+	i = np.load(xfile)
 	print("\nNumber of samples: %s" % len(i))
 	
 	j = i.reshape(len(i), 60, 60, 3)
-	k = np.load('y_labels.npy')
+	k = np.load(yfile)
 		  
 	return (j, k)
 
@@ -44,17 +46,8 @@ X /= 255
 # 1-hot encoding
 y = np_utils.to_categorical(y, num_classes)
 
-print('\nSplitting data into train/val/test. . ')
-X, X_test, y, y_test = train_test_split(X, y, test_size=0.33, random_state=42)
-X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.25, random_state=65)
-
-print('\nTraining: %s  Validation: %s  Testing: %s' % (len(X_train),len(X_val),len(X_test)))
-
-print('\nshuffling data . . ')
-# shuffle the data before training/testing	
-X_train, y_train = shuffle(X_train, y_train, random_state=73)
-X_val, y_val = shuffle(X_val, y_val, random_state=73)
-X_test, y_test = shuffle(X_test, y_test, random_state=73)
+skf = StratifiedKFold(n_splits=4,random_state=34, shuffle=True)
+print('using K-cross validation with %s folds' % skf.get_n_splits(X, y))
 
 # Model
 model = Sequential()
@@ -91,7 +84,7 @@ def compile_model():
 	
 	# compile the model
 	ada = optimizers.Adagrad(lr=0.0001, epsilon=1e-08, decay=0.0)
-	model.compile(loss='binary_crossentropy', optimizer=ada, metrics=['accuracy', metrics.binary_accuracy, 'mae'])
+	model.compile(loss='binary_crossentropy', optimizer=ada, metrics=['accuracy', 'mae'])
 
 # Train the model
 
@@ -101,27 +94,37 @@ def train_model():
 	# preprocessers for the training/validation data	
 	train_datagen = ImageDataGenerator(featurewise_center=True,featurewise_std_normalization=True, zca_whitening=False)
 	val_datagen = ImageDataGenerator(featurewise_center=True,featurewise_std_normalization=True, zca_whitening=False)
-	train_datagen.fit(X_train)
-	val_datagen.fit(X_val)
-
-	print('\nstart training . .')
-
-	# fits the model on batches with real-time data preprocessing:
-	model.fit_generator(train_datagen.flow(X_train, y_train, batch_size=batch_size),
-						steps_per_epoch = len(X_train) / batch_size,
-						validation_data = val_datagen.flow(X_val, y_val, batch_size=batch_size),
-						validation_steps = len(X_val) / batch_size,
-						callbacks = get_callbacks(),
-						epochs = epochs,
-						verbose = 1)
 	
-	# save the model to disk    
-	save_model(model)
+	print('\nstart training . .')
+	for fold, train_index, val_index in enumerate(skf.split(X, y)):
 
-def get_callbacks():
+		# Get the data from the folds		
+		X_train, X_val = X[train_index], X[val_index]
+		y_train, y_val = y[train_index], y[val_index]
+
+		print('\nFold: %s  Training: %s  Validation: %s' % (fold,len(X_train),len(X_val)))
+		
+		# fit the data
+		train_datagen.fit(X_train)
+		val_datagen.fit(X_val)	
+
+		# fits the model on batches with real-time data preprocessing:
+		model.fit_generator(train_datagen.flow(X_train, y_train, batch_size=batch_size),
+							steps_per_epoch = len(X_train) / batch_size,
+							validation_data = val_datagen.flow(X_val, y_val, batch_size=batch_size),
+							validation_steps = len(X_val) / batch_size,
+							callbacks = get_callbacks('fold' + fold + '/'),
+							epochs = epochs,
+							verbose = 1)
+
+	
+		# save the model to disk    
+		save_model(model, 'fold' + fold + '/')
+
+def get_callbacks(path):
 	
 	# training logger callback
-	csv = CSVLogger('training.log', separator=',')
+	csv = CSVLogger(path+'training.log', separator=',')
 
 	# learning rate reducer callback
 	reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.00001)
@@ -130,18 +133,18 @@ def get_callbacks():
 	es = EarlyStopping(monitor='val_loss', min_delta=0.001, patience=5, verbose=1, mode='auto')
 
 	# model checkpoint callback
-	path='checkpoints/weights.{epoch:02d}-{val_loss:.2f}.hdf5'
-	mcp = ModelCheckpoint(path, monitor='val_acc', verbose=1, save_best_only=True, save_weights_only=False, mode='max', period=5)
+	p=path+'checkpoints/weights.{epoch:02d}-{val_loss:.2f}.hdf5'
+	mcp = ModelCheckpoint(p, monitor='val_acc', verbose=1, save_best_only=True, save_weights_only=False, mode='max', period=5)
 
 	return [csv, reduce_lr, mcp]	
 	
-def save_model(model):
+def save_model(model, path):
 	# serialize model to JSON
 	model_json = model.to_json()
-	with open('model.json', "w") as json_file:
+	with open(path+'model.json', "w") as json_file:
 		json_file.write(model_json)
 	# serialize weights to HDF5
-	model.save_weights("model.h5")
+	model.save_weights(path+'model.h5")
 	print("\nSaved model to disk")
 
 def load_model():
